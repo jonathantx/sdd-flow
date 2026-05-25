@@ -1,3 +1,7 @@
+---
+title: "Patterns — como ESTE projeto escreve código"
+---
+
 # Patterns — como ESTE projeto escreve código
 
 Esta pasta guarda **exemplos reais** extraídos do seu próprio código. Enquanto as

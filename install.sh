@@ -97,11 +97,15 @@ chmod +x "$ROOT_DIR/.sdd/bin/sdd"
 find "$ROOT_DIR/.sdd/workflow/skills" -name '*.sh' -exec chmod +x {} \; 2>/dev/null || true
 ok "CLI em .sdd/bin/sdd (versão $(cat "$KIT_DIR/VERSION" 2>/dev/null || echo '?'))"
 
-# --- Docs skeleton ----------------------------------------------------------
-say "Instalando esqueleto de docs/"
+# --- Docs skeleton (NÃO-destrutivo) -----------------------------------------
+# Copia só o que ainda não existe: preserva docs e correções (ex.: titles) que o
+# usuário já tenha. Sem isso, reinstalar sobrescreveria docs/patterns/README.md e
+# reintroduziria o erro de frontmatter sem title no Fumadocs.
+say "Instalando esqueleto de docs/ (sem sobrescrever existentes)"
 mkdir -p "$ROOT_DIR/docs"
-cp -R "$ASSETS"/templates/docs/. "$ROOT_DIR/docs/" 2>/dev/null || true
-ok "docs/ (constitution, changelog, adr/, changes/)"
+( cd "$ASSETS/templates/docs" && find . -type d -exec mkdir -p "$ROOT_DIR/docs/{}" \; )
+( cd "$ASSETS/templates/docs" && find . -type f -exec cp -n {} "$ROOT_DIR/docs/{}" \; ) 2>/dev/null || true
+ok "docs/ (constitution, changelog, adr/, changes/, patterns/)"
 
 # --- Adaptadores das ferramentas (via CLI sdd sync) -------------------------
 say "Gerando adaptadores para: $TOOLS"

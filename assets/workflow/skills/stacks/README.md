@@ -1,3 +1,7 @@
+---
+title: "Stack Skills"
+---
+
 # Stack Skills
 
 Each subfolder here is a **knowledge base** for one technology stack. A stack
