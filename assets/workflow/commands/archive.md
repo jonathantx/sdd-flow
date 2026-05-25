@@ -165,31 +165,11 @@ Agrupe por data. Se já houver entradas da mesma data, adicione à seção exist
 
 Antes de commitar, rode validações rápidas para pegar drift de documentação:
 
-1. **Frontmatter publicável:** valide que todo Markdown em `docs/` tem `title` no frontmatter. Rode:
+1. **Frontmatter publicável (correção automática):** garanta que todo Markdown em `docs/` tenha `title` no frontmatter — exigência do Fumadocs. Em vez de só detectar, **corrija automaticamente** com a CLI:
    ```
-   node - <<'NODE'
-   const fs = require('fs');
-   const path = require('path');
-   let failed = false;
-   function walk(dir) {
-     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-       const file = path.join(dir, entry.name);
-       if (entry.isDirectory()) walk(file);
-       else if (file.endsWith('.md')) {
-         const text = fs.readFileSync(file, 'utf8');
-         const frontmatter = text.startsWith('---\n') ? text.split(/^---\s*$/m)[1] || '' : '';
-         if (!/^title:\s*.+$/m.test(frontmatter)) {
-           console.error(`[docs] missing frontmatter title: ${file}`);
-           failed = true;
-         }
-       }
-     }
-   }
-   walk('docs');
-   process.exit(failed ? 1 : 0);
-   NODE
+   .sdd/bin/sdd titles docs
    ```
-   Se algum arquivo falhar, adicione `title` e rode de novo.
+   O comando é idempotente: para cada `.md` sem `title`, ele deriva um título do primeiro `# Heading` (ou do nome do arquivo) e insere no frontmatter; arquivos que já têm `title` ficam intactos. Ele cobre `docs/changes/**`, `docs/adr/*`, `docs/patterns/**` e quaisquer docs pré-existentes — assim a documentação nunca quebra o contrato ao ser publicada. Depois, inclua no commit do archive os arquivos de `docs/` que receberam `title` (mesmo os que não são desta change, pois são correções de publicação seguras e necessárias).
 2. **Fumadocs, quando instalado:** se `docker-compose.sdd.yml` e `docs-fumadocs/` existem, rode:
    ```
    docker compose -f docker-compose.sdd.yml build docs-fumadocs

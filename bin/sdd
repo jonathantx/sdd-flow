@@ -80,15 +80,41 @@ cmd_sync() {
   ok "Sync concluído para: $tools"
 }
 
-# Claude Code: comandos viram .claude/commands/*.md. Skills NÃO são copiadas para
-# .claude/skills — ficam só na fonte (.sdd/workflow/skills), para nunca apagar
-# skills próprias que o usuário já tenha no projeto.
+# Copia nossas skills para o diretório de skills da ferramenta SEM apagar as do
+# usuário. Estratégia de convivência:
+#   - Nossas skills entram com prefixo "sdd-" (ex.: sdd-react, sdd-node-typescript).
+#   - O sync remove APENAS pastas "sdd-*" antigas (nossas), nunca as do usuário.
+#   - As skills do usuário (ui-ux-pro-max, brainstorming, etc.) ficam intactas.
+# Assim o Claude carrega as duas famílias lado a lado, sem colisão.
+copy_skills_namespaced() {
+  local wf="$1" skills_dir="$2"
+  [[ -d "$wf/skills" ]] || return 0
+  mkdir -p "$skills_dir"
+  # Limpa só o que é nosso (prefixo sdd-), preservando o resto.
+  find "$skills_dir" -maxdepth 1 -type d -name 'sdd-*' -exec rm -rf {} + 2>/dev/null || true
+  # Skills de stack: skills/stacks/<nome> → <skills_dir>/sdd-<nome>
+  if [[ -d "$wf/skills/stacks" ]]; then
+    for d in "$wf/skills/stacks"/*/; do
+      [[ -d "$d" ]] || continue
+      local nome; nome="$(basename "$d")"
+      cp -R "$d" "$skills_dir/sdd-$nome"
+    done
+  fi
+  # Skills de processo (analyze-project, etc.) no topo de skills/
+  for d in "$wf/skills"/*/; do
+    [[ -d "$d" ]] || continue
+    local nome; nome="$(basename "$d")"
+    [[ "$nome" == "stacks" ]] && continue
+    cp -R "$d" "$skills_dir/sdd-$nome"
+  done
+}
+
+# Claude Code: comandos → .claude/commands/*.md; nossas skills → .claude/skills/sdd-*
+# (convivendo com as skills próprias do usuário, que NUNCA são tocadas).
 sync_claude() {
   local wf="$1"
   local out="$PROJECT_ROOT/.claude"
   mkdir -p "$out/commands"
-  # Comandos: removemos APENAS os comandos que existem na fonte (nunca tocamos
-  # arquivos de terceiros que o usuário tenha em .claude/commands), depois copiamos.
   if [[ -d "$wf/commands" ]]; then
     for f in "$wf/commands"/*.md; do
       [[ -e "$f" ]] || continue
@@ -97,9 +123,8 @@ sync_claude() {
       cp "$f" "$out/commands/$base"
     done
   fi
-  # NÃO copiamos skills para .claude/skills — elas vivem na fonte (.sdd/workflow/skills)
-  # e os comandos as leem de lá. Copiar aqui apagaria skills próprias do usuário.
-  ok "claude → .claude/commands"
+  copy_skills_namespaced "$wf" "$out/skills"
+  ok "claude → .claude/commands + .claude/skills/sdd-* (suas skills preservadas)"
 }
 
 # Codex: custom prompts em .codex/prompts/*.md. O Codex aceita o mesmo formato
@@ -117,8 +142,8 @@ sync_codex() {
       cp "$f" "$out/prompts/$base"
     done
   fi
-  # Skills ficam na fonte (.sdd/workflow/skills) — não duplicamos em .codex/skills.
-  ok "codex → .codex/prompts (.md)"
+  copy_skills_namespaced "$wf" "$out/skills"
+  ok "codex → .codex/prompts (.md) + .codex/skills/sdd-* (suas skills preservadas)"
 }
 
 # Gemini: comandos viram .gemini/commands/*.toml (campo prompt); skills copiadas.
@@ -142,8 +167,8 @@ sync_gemini() {
       } > "$out/commands/$name.toml"
     done
   fi
-  # Skills ficam na fonte (.sdd/workflow/skills) — não duplicamos em .gemini/skills.
-  ok "gemini → .gemini/commands (toml)"
+  copy_skills_namespaced "$wf" "$out/skills"
+  ok "gemini → .gemini/commands (toml) + .gemini/skills/sdd-* (suas skills preservadas)"
 }
 
 # Remove o primeiro bloco de frontmatter YAML (--- ... ---) do arquivo.
@@ -214,6 +239,42 @@ cmd_check_drift() {
   fi
   [[ $rc -eq 0 ]] && ok "Sem drift." || warn "Drift detectado — re-rode sdd spec-hash após reconciliar."
   return $rc
+}
+
+# ===========================================================================
+# sdd titles [dir] — garante 'title' no frontmatter de todo .md (contrato Fumadocs)
+# Para cada .md sem 'title:', deriva um título do primeiro '# Heading' (ou do nome
+# do arquivo) e o insere no frontmatter, criando o bloco --- se não existir.
+# Idempotente: arquivos que já têm title são deixados como estão.
+# ===========================================================================
+cmd_titles() {
+  local root="${1:-$PROJECT_ROOT/docs}"
+  [[ -d "$root" ]] || { info "Nada a fazer: '$root' não existe."; return 0; }
+  local fixed=0 skipped=0
+  while IFS= read -r f; do
+    # já tem title no frontmatter? (primeiras ~15 linhas)
+    if head -15 "$f" | grep -qE '^title:[[:space:]]*\S'; then skipped=$((skipped+1)); continue; fi
+    # derivar título: 1º heading '# ...', senão nome do arquivo humanizado
+    local title
+    title="$(grep -m1 -E '^#[[:space:]]+' "$f" | sed -E 's/^#+[[:space:]]+//; s/[[:space:]]+$//')"
+    if [[ -z "$title" ]]; then
+      title="$(basename "$f" .md | sed -E 's/[-_]+/ /g')"
+      title="$(tr '[:lower:]' '[:upper:]' <<< "${title:0:1}")${title:1}"
+    fi
+    title="${title//\"/\'}"
+    local tmp; tmp="$(mktemp)"
+    if head -1 "$f" | grep -qE '^---[[:space:]]*$'; then
+      # já tem frontmatter → injeta a linha title logo após o primeiro ---
+      awk -v t="$title" 'NR==1{print; print "title: \"" t "\""; next} {print}' "$f" > "$tmp"
+    else
+      # não tem frontmatter → cria um bloco no topo
+      { printf -- '---\ntitle: "%s"\n---\n\n' "$title"; cat "$f"; } > "$tmp"
+    fi
+    mv "$tmp" "$f"
+    fixed=$((fixed+1))
+    info "  title adicionado: ${f#$PROJECT_ROOT/} → \"$title\""
+  done < <(find "$root" -name '*.md' 2>/dev/null)
+  ok "titles: $fixed corrigido(s), $skipped já tinham title."
 }
 
 # ===========================================================================
@@ -349,6 +410,7 @@ Comandos:
   ${c_bold}spec-hash${c_reset} <tasks.md>               Grava SHA do PRD/SPEC no tasks.md (detecção de drift)
   ${c_bold}check-drift${c_reset} <tasks.md>             Avisa se PRD/SPEC mudaram desde o tasks.md (no-op se não houver tasks)
   ${c_bold}verify${c_reset} [--strict]                  Confere se os adaptadores (.claude/.codex/.gemini) batem com a fonte
+  ${c_bold}titles${c_reset} [dir]                       Garante 'title' no frontmatter de todo .md em docs/ (contrato Fumadocs)
   ${c_bold}lint${c_reset}                               Valida SKILL.md e estrutura das skills
   ${c_bold}doctor${c_reset}                             Checagem de saúde da instalação
   ${c_bold}version${c_reset}                            Mostra a versão
@@ -364,6 +426,7 @@ main() {
     spec-hash)   cmd_spec_hash "$@" ;;
     check-drift) cmd_check_drift "$@" ;;
     verify)      cmd_verify "$@" ;;
+    titles)      cmd_titles "$@" ;;
     lint)        cmd_lint "$@" ;;
     doctor)      cmd_doctor "$@" ;;
     analyze)     warn "use o comando /analyze dentro do agente de IA (Claude/Codex/Gemini)"; exit 0 ;;
