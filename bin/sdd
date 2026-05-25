@@ -80,21 +80,26 @@ cmd_sync() {
   ok "Sync concluído para: $tools"
 }
 
-# Claude Code: comandos viram .claude/commands/*.md; skills viram .claude/skills/
+# Claude Code: comandos viram .claude/commands/*.md. Skills NÃO são copiadas para
+# .claude/skills — ficam só na fonte (.sdd/workflow/skills), para nunca apagar
+# skills próprias que o usuário já tenha no projeto.
 sync_claude() {
   local wf="$1"
   local out="$PROJECT_ROOT/.claude"
-  mkdir -p "$out/commands" "$out/skills"
-  # Comandos: copiar 1:1 (já estão no formato slash-command do Claude)
+  mkdir -p "$out/commands"
+  # Comandos: removemos APENAS os comandos que existem na fonte (nunca tocamos
+  # arquivos de terceiros que o usuário tenha em .claude/commands), depois copiamos.
   if [[ -d "$wf/commands" ]]; then
-    find "$wf/commands" -maxdepth 1 -name '*.md' ! -name 'README.md' -exec cp {} "$out/commands/" \;
+    for f in "$wf/commands"/*.md; do
+      [[ -e "$f" ]] || continue
+      local base; base="$(basename "$f")"
+      [[ "$base" == "README.md" ]] && continue
+      cp "$f" "$out/commands/$base"
+    done
   fi
-  # Skills: copiar a árvore inteira (SKILL.md + references/ + scripts/)
-  if [[ -d "$wf/skills" ]]; then
-    rm -rf "$out/skills"/*
-    cp -R "$wf/skills/." "$out/skills/"
-  fi
-  ok "claude → .claude/commands + .claude/skills"
+  # NÃO copiamos skills para .claude/skills — elas vivem na fonte (.sdd/workflow/skills)
+  # e os comandos as leem de lá. Copiar aqui apagaria skills próprias do usuário.
+  ok "claude → .claude/commands"
 }
 
 # Codex: custom prompts em .codex/prompts/*.md. O Codex aceita o mesmo formato
@@ -103,7 +108,7 @@ sync_claude() {
 sync_codex() {
   local wf="$1"
   local out="$PROJECT_ROOT/.codex"
-  mkdir -p "$out/prompts" "$out/skills"
+  mkdir -p "$out/prompts"
   if [[ -d "$wf/commands" ]]; then
     for f in "$wf/commands"/*.md; do
       [[ -e "$f" ]] || continue
@@ -112,18 +117,15 @@ sync_codex() {
       cp "$f" "$out/prompts/$base"
     done
   fi
-  if [[ -d "$wf/skills" ]]; then
-    rm -rf "$out/skills"/*
-    cp -R "$wf/skills/." "$out/skills/"
-  fi
-  ok "codex → .codex/prompts (.md) + .codex/skills"
+  # Skills ficam na fonte (.sdd/workflow/skills) — não duplicamos em .codex/skills.
+  ok "codex → .codex/prompts (.md)"
 }
 
 # Gemini: comandos viram .gemini/commands/*.toml (campo prompt); skills copiadas.
 sync_gemini() {
   local wf="$1"
   local out="$PROJECT_ROOT/.gemini"
-  mkdir -p "$out/commands" "$out/skills"
+  mkdir -p "$out/commands"
   if [[ -d "$wf/commands" ]]; then
     for f in "$wf/commands"/*.md; do
       [[ -e "$f" ]] || continue
@@ -140,11 +142,8 @@ sync_gemini() {
       } > "$out/commands/$name.toml"
     done
   fi
-  if [[ -d "$wf/skills" ]]; then
-    rm -rf "$out/skills"/*
-    cp -R "$wf/skills/." "$out/skills/"
-  fi
-  ok "gemini → .gemini/commands (toml) + .gemini/skills"
+  # Skills ficam na fonte (.sdd/workflow/skills) — não duplicamos em .gemini/skills.
+  ok "gemini → .gemini/commands (toml)"
 }
 
 # Remove o primeiro bloco de frontmatter YAML (--- ... ---) do arquivo.
