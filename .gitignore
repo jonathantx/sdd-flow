@@ -16,3 +16,14 @@ build/
 .env
 .env.*
 !.env.example
+
+# Artefatos de INSTALAÇÃO (gerados pelo install.sh/sdd sync num projeto-alvo).
+# O kit-fonte não deve versionar isto — só os assets/ originais.
+/.sdd/
+/.claude/
+/.codex/
+/.gemini/
+/docs/
+/docs-fumadocs/
+/scalar/
+/docker-compose.sdd.yml
