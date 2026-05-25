@@ -13,6 +13,8 @@ TOOLS="claude"           # ferramentas de IA: claude,codex,gemini
 STACKS=""                # node-typescript,php-laravel,react,svelte (vazio = todas)
 INSTALL_FUMADOCS=0
 INSTALL_SCALAR=0
+INSTALL_CI=0
+INSTALL_HOOK=0
 FORCE=0
 
 usage() {
@@ -28,7 +30,9 @@ Opções:
                       (default: todas as disponíveis)
   --fumadocs          Instala o site de documentação Fumadocs + serviço docker
   --scalar            Instala a referência de API Scalar + serviço docker
-  --all               Instala tudo: todas as ferramentas, todas as stacks, fumadocs e scalar
+  --ci                Instala o GitHub Action de governança (.github/workflows/sdd.yml)
+  --hook              Instala o git hook de pre-commit (verify + title)
+  --all               Instala tudo: ferramentas, stacks, fumadocs, scalar, CI e hook
   --force             Sobrescreve arquivos já gerenciados por este kit
   -h, --help          Mostra esta ajuda
 
@@ -49,7 +53,9 @@ while [[ $# -gt 0 ]]; do
     --stacks=*) STACKS="${1#*=}"; shift ;;
     --fumadocs) INSTALL_FUMADOCS=1; shift ;;
     --scalar) INSTALL_SCALAR=1; shift ;;
-    --all) TOOLS="claude,codex,gemini"; STACKS=""; INSTALL_FUMADOCS=1; INSTALL_SCALAR=1; shift ;;
+    --ci) INSTALL_CI=1; shift ;;
+    --hook) INSTALL_HOOK=1; shift ;;
+    --all) TOOLS="claude,codex,gemini"; STACKS=""; INSTALL_FUMADOCS=1; INSTALL_SCALAR=1; INSTALL_CI=1; INSTALL_HOOK=1; shift ;;
     --force) FORCE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Opção desconhecida: $1" >&2; usage; exit 1 ;;
@@ -94,6 +100,9 @@ mkdir -p "$ROOT_DIR/.sdd/bin"
 cp "$KIT_DIR/bin/sdd" "$ROOT_DIR/.sdd/bin/sdd"
 chmod +x "$ROOT_DIR/.sdd/bin/sdd"
 [[ -r "$KIT_DIR/VERSION" ]] && cp "$KIT_DIR/VERSION" "$ROOT_DIR/.sdd/VERSION"
+# Templates de hooks (para 'sdd hooks install' funcionar num projeto instalado)
+mkdir -p "$ROOT_DIR/.sdd/templates/hooks"
+cp -R "$ASSETS"/templates/hooks/. "$ROOT_DIR/.sdd/templates/hooks/" 2>/dev/null || true
 find "$ROOT_DIR/.sdd/workflow/skills" -name '*.sh' -exec chmod +x {} \; 2>/dev/null || true
 ok "CLI em .sdd/bin/sdd (versão $(cat "$KIT_DIR/VERSION" 2>/dev/null || echo '?'))"
 
@@ -123,6 +132,20 @@ if [[ $INSTALL_SCALAR -eq 1 ]]; then
   mkdir -p "$ROOT_DIR/scalar"
   cp -R "$ASSETS"/templates/scalar/. "$ROOT_DIR/scalar/"
   ok "scalar/ (porta 8802 via docker)"
+fi
+
+# --- CI (GitHub Action de governança) ---------------------------------------
+if [[ $INSTALL_CI -eq 1 ]]; then
+  say "Instalando GitHub Action de governança"
+  mkdir -p "$ROOT_DIR/.github/workflows"
+  cp -n "$ASSETS"/templates/github/workflows/sdd.yml "$ROOT_DIR/.github/workflows/sdd.yml" 2>/dev/null || true
+  ok ".github/workflows/sdd.yml (verify + lint + titles em cada PR)"
+fi
+
+# --- Git hook de pre-commit -------------------------------------------------
+if [[ $INSTALL_HOOK -eq 1 ]]; then
+  say "Instalando git hook de pre-commit"
+  ( cd "$ROOT_DIR" && "$ROOT_DIR/.sdd/bin/sdd" hooks install ) || true
 fi
 
 # --- docker-compose.sdd.yml (gerado conforme as flags de docs) --------------

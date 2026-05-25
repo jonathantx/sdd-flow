@@ -1,0 +1,26 @@
+# CI do próprio kit SDD Workflow (repo sdd-flow).
+# Roda o smoke test (install→sync→verify→titles→lint→doctor num sandbox) a cada
+# push e PR, garantindo que mudanças no kit não quebrem o workflow.
+name: sdd-kit-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tornar scripts executáveis
+        run: |
+          chmod +x bin/sdd install.sh tests/smoke.sh
+          find assets -name '*.sh' -exec chmod +x {} \;
+
+      - name: Smoke test (34 asserts)
+        run: bash tests/smoke.sh
+
+      - name: Lint das skills do kit
+        run: bash bin/sdd lint

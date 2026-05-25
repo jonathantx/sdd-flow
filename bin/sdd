@@ -248,13 +248,23 @@ cmd_check_drift() {
 # Idempotente: arquivos que já têm title são deixados como estão.
 # ===========================================================================
 cmd_titles() {
-  local root="${1:-$PROJECT_ROOT/docs}"
+  # --check: não corrige, só reporta os arquivos sem title e falha (exit 1) se
+  # houver algum. Para uso em CI/hook. Sem --check: corrige in-place (default).
+  local check=0 root=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --check) check=1; shift ;;
+      *) root="$1"; shift ;;
+    esac
+  done
+  root="${root:-$PROJECT_ROOT/docs}"
   [[ -d "$root" ]] || { info "Nada a fazer: '$root' não existe."; return 0; }
-  local fixed=0 skipped=0
+  local fixed=0 skipped=0 missing=0
   while IFS= read -r f; do
-    # já tem title no frontmatter? (primeiras ~15 linhas)
     if head -15 "$f" | grep -qE '^title:[[:space:]]*\S'; then skipped=$((skipped+1)); continue; fi
-    # derivar título: 1º heading '# ...', senão nome do arquivo humanizado
+    if [[ $check -eq 1 ]]; then
+      err "  sem title: ${f#$PROJECT_ROOT/}"; missing=$((missing+1)); continue
+    fi
     local title
     title="$(grep -m1 -E '^#[[:space:]]+' "$f" | sed -E 's/^#+[[:space:]]+//; s/[[:space:]]+$//')"
     if [[ -z "$title" ]]; then
@@ -264,16 +274,18 @@ cmd_titles() {
     title="${title//\"/\'}"
     local tmp; tmp="$(mktemp)"
     if head -1 "$f" | grep -qE '^---[[:space:]]*$'; then
-      # já tem frontmatter → injeta a linha title logo após o primeiro ---
       awk -v t="$title" 'NR==1{print; print "title: \"" t "\""; next} {print}' "$f" > "$tmp"
     else
-      # não tem frontmatter → cria um bloco no topo
       { printf -- '---\ntitle: "%s"\n---\n\n' "$title"; cat "$f"; } > "$tmp"
     fi
     mv "$tmp" "$f"
     fixed=$((fixed+1))
     info "  title adicionado: ${f#$PROJECT_ROOT/} → \"$title\""
   done < <(find "$root" -name '*.md' 2>/dev/null)
+  if [[ $check -eq 1 ]]; then
+    [[ $missing -eq 0 ]] && { ok "titles --check: todos os .md têm title ($skipped)."; return 0; }
+    err "titles --check: $missing arquivo(s) sem title. Rode 'sdd titles $root' para corrigir."; return 1
+  fi
   ok "titles: $fixed corrigido(s), $skipped já tinham title."
 }
 
@@ -284,6 +296,8 @@ cmd_lint() {
   local wf rc=0
   wf="$(resolve_workflow_dir)"
   [[ -n "$wf" ]] || die "fonte-única não encontrada."
+
+  # --- 1. Skills: cada SKILL.md tem frontmatter + name + description ---------
   info "Lint das skills em $wf/skills"
   while IFS= read -r skill; do
     local f="$skill/SKILL.md"
@@ -293,6 +307,29 @@ cmd_lint() {
     grep -q '^description:' "$f" || { err "campo 'description' ausente: $f"; rc=1; }
     grep -q '^version:' "$f"     || warn "campo 'version' ausente: $f"
   done < <(find "$wf/skills" -mindepth 1 -type d -exec test -f "{}/SKILL.md" \; -print 2>/dev/null)
+
+  # --- 2. Artefatos de change: frontmatter válido em docs/changes ------------
+  # Cada artefato principal (00-idea, 01-PRD, 02-SPEC, README, FIX, tasks/*)
+  # deve ter frontmatter com title; PRD/SPEC/README devem ter status válido.
+  local changes_dir="$PROJECT_ROOT/docs/changes"
+  if [[ -d "$changes_dir" ]]; then
+    info "Lint dos artefatos em docs/changes"
+    local valid_status='^(draft|approved|validated|ready|in-progress|in-review|done|delivered|blocked)$'
+    while IFS= read -r art; do
+      # frontmatter presente
+      if ! head -1 "$art" | grep -qE '^---[[:space:]]*$'; then
+        err "artefato sem frontmatter: ${art#$PROJECT_ROOT/}"; rc=1; continue
+      fi
+      # title presente (contrato Fumadocs)
+      head -20 "$art" | grep -qE '^title:[[:space:]]*\S' || { err "artefato sem 'title': ${art#$PROJECT_ROOT/}"; rc=1; }
+      # status, quando presente, deve ser válido
+      local st; st="$(sed -n 's/^status:[[:space:]]*//p' "$art" | head -1 | tr -d ' ')"
+      if [[ -n "$st" ]] && ! grep -qE "$valid_status" <<< "$st"; then
+        err "status inválido '$st' em ${art#$PROJECT_ROOT/}"; rc=1
+      fi
+    done < <(find "$changes_dir" -type f \( -name '0*-*.md' -o -name 'README.md' -o -name 'FIX.md' -o -name 'REFACTOR.md' -o -path '*/tasks/*.md' \) 2>/dev/null)
+  fi
+
   [[ $rc -eq 0 ]] && ok "Lint OK" || err "Lint encontrou problemas"
   return $rc
 }
@@ -367,6 +404,42 @@ cmd_verify() {
 }
 
 # ===========================================================================
+# sdd hooks install|uninstall — instala o git hook de pre-commit no projeto
+# ===========================================================================
+cmd_hooks() {
+  local action="${1:-install}"
+  local git_dir; git_dir="$(git -C "$PROJECT_ROOT" rev-parse --git-dir 2>/dev/null)" || die "não é um repositório git."
+  local hooks_dir="$PROJECT_ROOT/$git_dir/hooks"
+  local target="$hooks_dir/pre-commit"
+  # fonte do template do hook (no kit ou no .sdd instalado)
+  local src=""
+  for p in "$KIT_ASSETS/templates/hooks/pre-commit" "$PROJECT_ROOT/.sdd/templates/hooks/pre-commit"; do
+    [[ -r "$p" ]] && { src="$p"; break; }
+  done
+  case "$action" in
+    install)
+      [[ -n "$src" ]] || die "template do hook não encontrado."
+      mkdir -p "$hooks_dir"
+      if [[ -f "$target" ]] && ! grep -q 'SDD pre-commit hook' "$target"; then
+        warn "já existe um pre-commit não-SDD em $target — salvando como pre-commit.bak"
+        cp "$target" "$target.bak"
+      fi
+      cp "$src" "$target"; chmod +x "$target"
+      ok "hook instalado: $target (pule com SDD_SKIP_HOOK=1)"
+      ;;
+    uninstall)
+      if [[ -f "$target" ]] && grep -q 'SDD pre-commit hook' "$target"; then
+        rm -f "$target"; ok "hook SDD removido."
+        [[ -f "$target.bak" ]] && { mv "$target.bak" "$target"; info "pre-commit anterior restaurado."; }
+      else
+        info "nenhum hook SDD instalado."
+      fi
+      ;;
+    *) die "uso: sdd hooks [install|uninstall]" ;;
+  esac
+}
+
+# ===========================================================================
 # sdd doctor — checagem de saúde da instalação
 # ===========================================================================
 cmd_doctor() {
@@ -410,8 +483,9 @@ Comandos:
   ${c_bold}spec-hash${c_reset} <tasks.md>               Grava SHA do PRD/SPEC no tasks.md (detecção de drift)
   ${c_bold}check-drift${c_reset} <tasks.md>             Avisa se PRD/SPEC mudaram desde o tasks.md (no-op se não houver tasks)
   ${c_bold}verify${c_reset} [--strict]                  Confere se os adaptadores (.claude/.codex/.gemini) batem com a fonte
-  ${c_bold}titles${c_reset} [dir]                       Garante 'title' no frontmatter de todo .md em docs/ (contrato Fumadocs)
-  ${c_bold}lint${c_reset}                               Valida SKILL.md e estrutura das skills
+  ${c_bold}titles${c_reset} [--check] [dir]            Garante/checa 'title' no frontmatter de .md em docs/ (Fumadocs)
+  ${c_bold}lint${c_reset}                               Valida SKILL.md, skills e artefatos de change (frontmatter/status)
+  ${c_bold}hooks${c_reset} install|uninstall            Instala/remove o git hook de pre-commit
   ${c_bold}doctor${c_reset}                             Checagem de saúde da instalação
   ${c_bold}version${c_reset}                            Mostra a versão
 
@@ -428,6 +502,7 @@ main() {
     verify)      cmd_verify "$@" ;;
     titles)      cmd_titles "$@" ;;
     lint)        cmd_lint "$@" ;;
+    hooks)       cmd_hooks "$@" ;;
     doctor)      cmd_doctor "$@" ;;
     analyze)     warn "use o comando /analyze dentro do agente de IA (Claude/Codex/Gemini)"; exit 0 ;;
     version|--version|-v) cmd_version ;;

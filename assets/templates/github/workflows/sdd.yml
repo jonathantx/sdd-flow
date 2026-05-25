@@ -1,0 +1,30 @@
+# Gate de governança SDD para este projeto.
+# Roda em cada PR: confirma que os adaptadores estão fiéis à fonte, que as skills
+# e artefatos são válidos, e que toda doc tem 'title' (contrato Fumadocs).
+# Falha o PR se algo estiver fora — protege quem usa o workflow de erros comuns.
+name: sdd-governance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  governance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Permissões dos scripts
+        run: |
+          [ -x .sdd/bin/sdd ] || chmod +x .sdd/bin/sdd
+          find .sdd -name '*.sh' -exec chmod +x {} \; 2>/dev/null || true
+
+      - name: Adaptadores fiéis à fonte (sync esquecido / edição à mão)
+        run: .sdd/bin/sdd verify --strict
+
+      - name: Lint de skills e artefatos de change
+        run: .sdd/bin/sdd lint
+
+      - name: Toda doc tem title (contrato Fumadocs)
+        run: .sdd/bin/sdd titles --check docs

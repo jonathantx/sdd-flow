@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# SDD pre-commit hook — validação leve antes de cada commit.
+# Instalado por: sdd hooks install
+#
+# O que faz (rápido, não bloqueia commits normais sem motivo):
+#   1. sdd verify  — avisa se os adaptadores divergem da fonte (não bloqueia)
+#   2. titles      — garante title em docs/ que estão sendo commitados (bloqueia)
+#
+# Para pular em um commit específico:  SDD_SKIP_HOOK=1 git commit ...
+set -uo pipefail
+
+[[ "${SDD_SKIP_HOOK:-0}" == "1" ]] && exit 0
+
+SDD=""
+for p in .sdd/bin/sdd ./bin/sdd; do [[ -x "$p" ]] && { SDD="$p"; break; }; done
+[[ -n "$SDD" ]] || exit 0   # SDD não instalado aqui → não atrapalha
+
+# 1. Fidelidade dos adaptadores (informativo, não bloqueia)
+"$SDD" verify >/dev/null 2>&1 || {
+  echo "[sdd] aviso: adaptadores divergem da fonte. Rode 'sdd sync' quando puder."
+}
+
+# 2. Title nos docs staged (bloqueia: Fumadocs quebra sem title)
+staged_docs="$(git diff --cached --name-only --diff-filter=ACM | grep -E '^docs/.*\.md$' || true)"
+if [[ -n "$staged_docs" ]]; then
+  missing=0
+  while IFS= read -r f; do
+    [[ -f "$f" ]] || continue
+    head -15 "$f" | grep -qE '^title:[[:space:]]*\S' || { echo "[sdd] ✗ sem title: $f"; missing=1; }
+  done <<< "$staged_docs"
+  if [[ $missing -eq 1 ]]; then
+    echo "[sdd] commit bloqueado: docs sem 'title' (Fumadocs exige)."
+    echo "[sdd] corrija com:  $SDD titles docs  &&  git add docs"
+    echo "[sdd] (ou pule com: SDD_SKIP_HOOK=1 git commit ...)"
+    exit 1
+  fi
+fi
+
+exit 0

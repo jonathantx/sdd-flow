@@ -126,6 +126,33 @@ out="$("$SDD" doctor 2>&1)"; rc=$?
 assert_exit "doctor retorna 0" 0 "$rc"
 assert_contains "doctor conclui" "$out" "Doctor concluído"
 
+# --- 12. ONDA 2: titles --check ---------------------------------------------
+step "sdd titles --check"
+mkdir -p docs/zz && printf '# Doc sem frontmatter\ntexto\n' > docs/zz/bad.md
+out="$("$SDD" titles --check docs 2>&1)"; rc=$?
+assert_exit "titles --check falha com doc sem title" 1 "$rc"
+"$SDD" titles docs >/dev/null 2>&1   # corrige
+out="$("$SDD" titles --check docs 2>&1)"; rc=$?
+assert_exit "titles --check passa após corrigir" 0 "$rc"
+
+# --- 13. ONDA 2: lint de artefatos ------------------------------------------
+step "sdd lint (artefato com status inválido)"
+mkdir -p docs/changes/feat-lint && printf -- '---\ntitle: "X"\nstatus: invalido\n---\n# X\n' > docs/changes/feat-lint/01-PRD.md
+out="$("$SDD" lint 2>&1)"; rc=$?
+assert_exit "lint falha com status inválido" 1 "$rc"
+rm -rf docs/changes/feat-lint
+
+# --- 14. ONDA 2: hooks install ----------------------------------------------
+step "sdd hooks install"
+out="$("$SDD" hooks install 2>&1)"; rc=$?
+assert_exit "hooks install retorna 0" 0 "$rc"
+assert_file "pre-commit instalado" ".git/hooks/pre-commit"
+
+# --- 15. ONDA 2: CI template via install --ci -------------------------------
+step "install --ci"
+bash "$KIT_DIR/install.sh" --tools claude --ci >/dev/null 2>&1
+assert_file "GitHub Action instalado" ".github/workflows/sdd.yml"
+
 # --- Resumo -----------------------------------------------------------------
 printf "\n──────────────────────────────\n"
 printf "%sPASS: %d%s   %sFAIL: %d%s\n" "$c_g" "$PASS" "$c_0" "$c_r" "$FAIL" "$c_0"
