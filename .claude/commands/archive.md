@@ -1,0 +1,261 @@
+---
+description: Fecha uma change concluída — gera o dossiê final, sincroniza a documentação viva com o que mudou, registra no CHANGELOG global e marca como entregue
+argument-hint: <slug-da-change>
+allowed-tools: Bash(git:*), Bash(find:*), Bash(grep:*), Bash(ls:*), Bash(wc:*), Bash(test:*), Bash(date:*), Bash(basename:*), Bash(node:*), Bash(docker:*), Bash(curl:*), Read, Grep, Glob, Write, Edit, Task
+---
+
+# Comando /archive
+
+Você fecha uma change concluída no workflow Spec-Driven local. Três responsabilidades: (1) consolidar o **dossiê final** (README da change), (2) **sincronizar a documentação viva** (guides/reference/explanation) com o que efetivamente mudou no código, e (3) registrar a entrega no **CHANGELOG global**. Ao final, marca a change como `delivered`. É o último passo antes do merge na main.
+
+Argumento (slug): `$ARGUMENTS`
+
+Contexto:
+- Branch atual: !`git branch --show-current 2>/dev/null || echo "(fora de repo git)"`
+- Data: !`date +%Y-%m-%d`
+- Changes candidatas: !`find docs/changes -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort || echo "(nenhuma)"`
+
+---
+
+## Regras
+
+1. **Doc é prosa que humanos leem — não invente.** Toda atualização de documentação deve se basear no que realmente mudou (a SPEC, os commits, o diff). Nunca fabrique comportamento, número ou instrução que o código não suporta.
+2. **Sincronize, não reescreva.** Atualize as páginas afetadas com cirurgia — mude o que ficou desatualizado, preserve o resto. Não reescreva páginas inteiras sem necessidade.
+3. **O usuário revisa antes do merge.** Você commita na branch da change, mas a doc gerada deve ser revisada por ele antes do merge final na main. Deixe isso claro.
+4. **Diagramas em Mermaid, nunca imagem.** Se precisar atualizar/criar diagrama, use Mermaid embutido (a IA consegue manter; PNG vira drift).
+5. **Adapte ao tipo da change.** Feature recebe o tratamento completo; fix e chore recebem versões mais leves (ver Fase 1).
+
+---
+
+## Fase 0 — Resolver a change
+
+1. Localize `docs/changes/{feat|fix|chore}-*-{slug}` a partir de `$ARGUMENTS`.
+2. Se vazio/ambíguo, liste candidatas e pergunte. Encerre.
+3. Identifique o `kind` (pelo prefixo da pasta e pelo frontmatter do README/artefato principal).
+
+---
+
+## Fase 1 — Validar pré-condições e ramificar por tipo
+
+Leia o frontmatter dos artefatos. O peso do archive depende do tipo:
+
+**FEATURE:** confira que **todas** as tasks em `tasks/` estão `status: done`.
+- Se alguma não está: PARE. Liste as pendentes e oriente — "Conclua a implementação (`/preparar-lote {slug}`) antes de arquivar." Encerre.
+- Se ok: tratamento completo (Fases 2–6).
+
+**FIX:** confira que o `FIX.md` está implementado (status `done`/`in-review` resolvido).
+- Tratamento leve: dossiê curto + entrada no CHANGELOG + sync de doc apenas se o comportamento corrigido estava documentado.
+
+**CHORE:** se há `NOTE.md`, tratamento mínimo: entrada no CHANGELOG (se documentável) + marca delivered. Sem sync de docs a menos que o chore mude algo documentado.
+
+Se a change já está `delivered`, avise e pergunte se deseja re-arquivar (regenerar dossiê/doc).
+
+---
+
+## Fase 2 — Coletar o estado final
+
+Reúna o material que vai alimentar dossiê e doc:
+
+1. **Artefatos da change:** `00-idea.md`, `01-PRD.md`, `02-SPEC.md` (ou `FIX.md`), todas as `tasks/*.md`, ADRs referenciados.
+2. **Commits da feature** — os relatórios de implementação estão nos corpos:
+   ```
+   git log main..feat/{slug} --pretty=format:'%h %s%n%b'
+   ```
+3. **Diff agregado** — o que a change realmente mudou no código:
+   ```
+   git diff main...feat/{slug} --stat
+   git diff main...feat/{slug} --name-only
+   ```
+   Use o `--stat` e `--name-only` para saber QUE arquivos mudaram; leia o diff completo de arquivos específicos só quando precisar entender uma mudança para documentá-la.
+
+---
+
+## Fase 3 — Gerar o dossiê final (README da change)
+
+Atualize `docs/changes/{pasta}/README.md` para a versão final. Para FEATURE:
+
+```markdown
+---
+type: change
+title: "{Título da feature}"
+kind: feature
+slug: {slug}
+status: delivered
+external_id: null
+created: {data-original}
+delivered_at: {YYYY-MM-DD}
+---
+
+# {Título da feature}
+
+> {uma linha}
+
+## Estado
+✅ Entregue em {YYYY-MM-DD} · branch feat/{slug}
+
+## Sumário
+{2-4 frases: o que foi entregue, do ponto de vista de produto}
+
+## Artefatos
+- 📋 [PRD](./01-PRD.md) — aprovado em {data}
+- 📐 [SPEC](./02-SPEC.md) — validada
+- 🏛️ ADRs: {lista com links, ou "nenhum"}
+
+## Tasks executadas
+| Task | Complexidade | Status |
+|---|---|---|
+| [TASK-001 …](./tasks/…) | small | ✅ |
+| … | | |
+
+## Mudanças de stack
+{novas dependências, mudanças de config; ou "nenhuma"}
+
+## Configuração pós-deploy
+{passos obrigatórios após deploy — seeds, flags, permissions; ou "nenhuma"}
+
+## Como reverter (rollback)
+{resumo da estratégia de rollback da SPEC}
+
+## Limitações conhecidas
+{o que ficou de fora / para próximas iterações}
+```
+
+Para FIX/CHORE, um dossiê curto basta (sintoma/correção/arquivos, ou o que mudou e por quê).
+
+---
+
+## Fase 4 — Sincronizar a documentação viva
+
+Esta é a parte que mantém a doc honesta. Trabalhe em três camadas (Diátaxis):
+
+**1. Identifique o que mudou de comportamento.** A partir da SPEC + diff, liste os componentes e comportamentos novos/alterados que são observáveis ou relevantes para quem lê a doc.
+
+**2. Encontre as páginas afetadas.** Para cada conceito/componente tocado, faça `grep` em `docs/guides/`, `docs/reference/`, `docs/explanation/` procurando menções. Use subagents (Task) para varrer em paralelo se houver muitas páginas.
+
+**3. Atualize por camada:**
+
+- **reference/** — se a change mexeu em API, endpoints, permissions, schema, config: atualize as tabelas/listas correspondentes. Baseie-se no diff real (ex: permission nova no seeder → linha nova em `reference/permissions.md`).
+
+- **scalar/openapi.yaml** — se a change mexeu em rotas HTTP, endpoints, payloads, status codes ou contrato de API e `scalar/openapi.yaml` existe, atualize o OpenAPI junto com `reference/`. Não deixe o Scalar com placeholder ou contrato divergente do app.
+
+- **guides/** — se a change introduz algo que o usuário final faz (um novo fluxo, botão, capacidade): atualize o guia existente OU crie um guia novo passo-a-passo. Guias são didáticos e em linguagem do usuário, não do dev.
+
+- **explanation/** — se a change altera a arquitetura ou introduz um padrão estrutural novo: atualize `explanation/architecture.md` (com diagrama Mermaid se ajudar) e referencie os ADRs relevantes. Mudanças pequenas raramente tocam aqui.
+
+Para cada arquivo que você criar/editar, faça edição cirúrgica e fiel ao que mudou. Se não houver nada a atualizar numa camada, não invente conteúdo só para preencher.
+
+**Contrato de publicação Fumadocs:** todo `.md` publicado em `docs/` deve ter frontmatter YAML com `title` string. Isso inclui `docs/changes/**` (`00-idea.md`, `01-PRD.md`, `02-SPEC.md`, `03-PLAN-EXEC.md`, `README.md`, `tasks/*.md`, `FIX.md`, `NOTE.md`) e `docs/adr/*.md`. Se criar ou tocar um Markdown sem `title`, corrija antes de commitar.
+
+---
+
+## Fase 5 — Registrar no CHANGELOG global
+
+Atualize `docs/CHANGELOG.md` (crie com cabeçalho se não existir), adicionando a entrada mais recente no topo:
+
+```markdown
+## {YYYY-MM-DD}
+- **{kind}({slug})** — {uma linha do que mudou}. [Detalhes](./changes/{pasta}/README.md)
+```
+
+Agrupe por data. Se já houver entradas da mesma data, adicione à seção existente. O CHANGELOG global é o que vira release notes e o que o `llms.txt` expõe — mantenha as entradas concisas e em linguagem de produto.
+
+---
+
+## Fase 5.5 — Validar publicação da documentação
+
+Antes de commitar, rode validações rápidas para pegar drift de documentação:
+
+1. **Frontmatter publicável:** valide que todo Markdown em `docs/` tem `title` no frontmatter. Rode:
+   ```
+   node - <<'NODE'
+   const fs = require('fs');
+   const path = require('path');
+   let failed = false;
+   function walk(dir) {
+     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+       const file = path.join(dir, entry.name);
+       if (entry.isDirectory()) walk(file);
+       else if (file.endsWith('.md')) {
+         const text = fs.readFileSync(file, 'utf8');
+         const frontmatter = text.startsWith('---\n') ? text.split(/^---\s*$/m)[1] || '' : '';
+         if (!/^title:\s*.+$/m.test(frontmatter)) {
+           console.error(`[docs] missing frontmatter title: ${file}`);
+           failed = true;
+         }
+       }
+     }
+   }
+   walk('docs');
+   process.exit(failed ? 1 : 0);
+   NODE
+   ```
+   Se algum arquivo falhar, adicione `title` e rode de novo.
+2. **Fumadocs, quando instalado:** se `docker-compose.sdd.yml` e `docs-fumadocs/` existem, rode:
+   ```
+   docker compose -f docker-compose.sdd.yml build docs-fumadocs
+   docker compose -f docker-compose.sdd.yml up -d docs-fumadocs
+   curl -fsS http://localhost:8801/docs >/dev/null
+   ```
+   Também valide por `curl` pelo menos uma página da change arquivada e uma página de ADR, se existirem.
+3. **Scalar, quando instalado:** se `docker-compose.sdd.yml` e `scalar/openapi.yaml` existem, rode:
+   ```
+   docker compose -f docker-compose.sdd.yml build scalar
+   docker compose -f docker-compose.sdd.yml up -d scalar
+   curl -fsS http://localhost:8802 >/dev/null
+   curl -fsS http://localhost:8802/openapi.yaml >/dev/null
+   ```
+   Se a change mexeu em API/endpoints, confirme que `scalar/openapi.yaml` não é o placeholder inicial e descreve as rotas reais.
+
+Se alguma validação falhar, corrija a doc ou o setup de preview antes da Fase 6.
+
+---
+
+## Fase 6 — Marcar entregue e commitar
+
+1. Confirme que o frontmatter do README está com `status: delivered` e `delivered_at` preenchido.
+2. Se `scalar/openapi.yaml` foi alterado, inclua-o no commit junto com `docs/`.
+3. Commit na branch `feat/{slug}` (ou a branch da change):
+   ```
+   git add docs/
+   test ! -f scalar/openapi.yaml || git add scalar/openapi.yaml
+   git commit -m "docs({slug}): archive — dossiê, sync de docs e changelog"
+   ```
+
+---
+
+## Fase 7 — Confirmação e próximo passo
+
+Mostre ao usuário, conciso:
+
+1. Dossiê finalizado (caminho do README).
+2. **Páginas de doc tocadas** — liste-as explicitamente, separadas por camada (reference/guides/explanation), porque ele precisa **revisar essas** antes do merge (doc é prosa, IA pode errar tom ou precisão).
+3. Entrada adicionada ao CHANGELOG.
+4. **Próximo passo — merge final na main** (squash, mantém histórico limpo):
+   ```
+   # revise a doc gerada primeiro:
+   git diff main...feat/{slug} -- docs/
+
+   # depois:
+   git checkout main && git pull
+   git merge --squash feat/{slug}
+   git commit -m "{kind}({slug}): {título da change}"
+   git push
+   ```
+   (Opcional: se quiser preview/registro, abra um PR `feat/{slug} → main` em vez do squash local.)
+5. Após o merge, o `llms.txt`/`llms-full.txt` são regenerados pelo plugin do VitePress no build — não precisa editar à mão.
+
+Não despeje o conteúdo das páginas na confirmação — liste os caminhos; ele abre o que quiser revisar.
+
+---
+
+## Notas de instalação
+
+Salve como **`.claude/commands/archive.md`**. Invoque com `/archive <slug>`.
+
+Este comando edita documentação (`Write`/`Edit`) baseando-se no diff real da change. A guarda principal é comportamental: **fiel ao que mudou, revisão humana antes do merge**. Por isso ele commita na branch da change (não na main) — a doc gerada passa pelo seu olhar no diff final.
+
+`Task` está em `allowed-tools` para varrer páginas de doc em paralelo na Fase 4 (útil em projetos com documentação extensa); se não estiver disponível, faça a varredura com `grep` sequencial.
+
+Modelo recomendado: a síntese do dossiê e a edição de doc se beneficiam de raciocínio cuidadoso e bom texto. Use o modelo mais forte disponível na sessão.
+
+**Relação com o resto do fluxo:** o `/preparar-lote` aponta para `/archive` quando todas as tasks ficam `done`. O `/archive` é o passo "In Docs" do workflow original, agora autocontido — sem board, ele deriva tudo do estado dos arquivos e do Git.

@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Node (do worker e do fumadocs template, se houver build local)
+node_modules/
+dist/
+build/
+.next/
+*.log
+
+# Saídas temporárias de teste
+/tmp/
+*.tmp
+
+# Ambiente
+.env
+.env.*
+!.env.example

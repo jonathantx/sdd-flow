@@ -1,0 +1,283 @@
+#!/usr/bin/env bash
+# sdd — Spec-Driven Development workflow CLI (shell edition)
+#
+# Single-source-of-truth model: você edita SOMENTE em assets/workflow/.
+# Este CLI projeta o workflow para cada ferramenta de IA (Claude, Codex, Gemini)
+# e oferece gates de saúde (doctor/lint) e detecção de drift (spec-hash).
+#
+# A interface de subcomandos abaixo foi desenhada para, no futuro, ser
+# reimplementada por um binário Go sem mudar como o usuário a invoca.
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Localização do kit (onde estão os assets) e do projeto alvo (cwd)
+# ---------------------------------------------------------------------------
+SDD_VERSION="2.0.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Quando instalado em um projeto, os assets ficam em .sdd/. Quando rodado a
+# partir do kit, ficam em ../assets. Resolvemos os dois casos.
+if [[ -d "$SCRIPT_DIR/../assets/workflow" ]]; then
+  KIT_ASSETS="$(cd "$SCRIPT_DIR/../assets" && pwd)"
+elif [[ -d "$SCRIPT_DIR/../workflow" ]]; then
+  KIT_ASSETS="$(cd "$SCRIPT_DIR/.." && pwd)"
+else
+  KIT_ASSETS=""
+fi
+PROJECT_ROOT="$(pwd)"
+
+c_reset=$'\033[0m'; c_bold=$'\033[1m'; c_red=$'\033[31m'
+c_green=$'\033[32m'; c_yellow=$'\033[33m'; c_blue=$'\033[34m'
+info()  { printf "%s•%s %s\n" "$c_blue" "$c_reset" "$*"; }
+ok()    { printf "%s✓%s %s\n" "$c_green" "$c_reset" "$*"; }
+warn()  { printf "%s!%s %s\n" "$c_yellow" "$c_reset" "$*"; }
+err()   { printf "%s✗%s %s\n" "$c_red" "$c_reset" "$*" >&2; }
+die()   { err "$*"; exit 1; }
+
+resolve_workflow_dir() {
+  # Onde está a fonte-única no projeto alvo (após install) ou no kit.
+  if [[ -d "$PROJECT_ROOT/.sdd/workflow" ]]; then
+    echo "$PROJECT_ROOT/.sdd/workflow"
+  elif [[ -n "$KIT_ASSETS" && -d "$KIT_ASSETS/workflow" ]]; then
+    echo "$KIT_ASSETS/workflow"
+  else
+    echo ""
+  fi
+}
+
+# ===========================================================================
+# sdd sync — gera adaptadores por ferramenta a partir da fonte-única
+# ===========================================================================
+cmd_sync() {
+  local tools="claude" wf
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --tools) tools="$2"; shift 2 ;;
+      --tools=*) tools="${1#*=}"; shift ;;
+      *) die "sync: opção desconhecida: $1" ;;
+    esac
+  done
+  wf="$(resolve_workflow_dir)"
+  [[ -n "$wf" ]] || die "Não encontrei a fonte-única (.sdd/workflow). Rode o install primeiro."
+
+  info "Gerando adaptadores a partir de: $wf"
+  IFS=',' read -ra TOOL_LIST <<< "$tools"
+  for tool in "${TOOL_LIST[@]}"; do
+    case "$tool" in
+      claude) sync_claude "$wf" ;;
+      codex)  sync_codex  "$wf" ;;
+      gemini) sync_gemini "$wf" ;;
+      *) warn "ferramenta desconhecida ignorada: $tool" ;;
+    esac
+  done
+  ok "Sync concluído para: $tools"
+}
+
+# Claude Code: comandos viram .claude/commands/*.md; skills viram .claude/skills/
+sync_claude() {
+  local wf="$1"
+  local out="$PROJECT_ROOT/.claude"
+  mkdir -p "$out/commands" "$out/skills"
+  # Comandos: copiar 1:1 (já estão no formato slash-command do Claude)
+  if [[ -d "$wf/commands" ]]; then
+    find "$wf/commands" -maxdepth 1 -name '*.md' ! -name 'README.md' -exec cp {} "$out/commands/" \;
+  fi
+  # Skills: copiar a árvore inteira (SKILL.md + references/ + scripts/)
+  if [[ -d "$wf/skills" ]]; then
+    rm -rf "$out/skills"/*
+    cp -R "$wf/skills/." "$out/skills/"
+  fi
+  ok "claude → .claude/commands + .claude/skills"
+}
+
+# Codex: comandos viram prompts em .codex/prompts/*.md; skills referenciadas.
+sync_codex() {
+  local wf="$1"
+  local out="$PROJECT_ROOT/.codex"
+  mkdir -p "$out/prompts" "$out/skills"
+  if [[ -d "$wf/commands" ]]; then
+    for f in "$wf/commands"/*.md; do
+      [[ -e "$f" ]] || continue
+      local base; base="$(basename "$f")"
+      [[ "$base" == "README.md" ]] && continue
+      # Codex não tem frontmatter de slash-command; removemos o bloco YAML do topo.
+      strip_frontmatter "$f" > "$out/prompts/$base"
+    done
+  fi
+  if [[ -d "$wf/skills" ]]; then
+    rm -rf "$out/skills"/*
+    cp -R "$wf/skills/." "$out/skills/"
+  fi
+  ok "codex → .codex/prompts + .codex/skills"
+}
+
+# Gemini: comandos viram .gemini/commands/*.toml (campo prompt); skills copiadas.
+sync_gemini() {
+  local wf="$1"
+  local out="$PROJECT_ROOT/.gemini"
+  mkdir -p "$out/commands" "$out/skills"
+  if [[ -d "$wf/commands" ]]; then
+    for f in "$wf/commands"/*.md; do
+      [[ -e "$f" ]] || continue
+      local base name desc
+      base="$(basename "$f" .md)"
+      [[ "$base" == "README" ]] && continue
+      name="$base"
+      desc="$(sed -n 's/^description:[[:space:]]*//p' "$f" | head -1)"
+      {
+        printf 'description = "%s"\n\n' "${desc//\"/\\\"}"
+        printf 'prompt = """\n'
+        strip_frontmatter "$f"
+        printf '"""\n'
+      } > "$out/commands/$name.toml"
+    done
+  fi
+  if [[ -d "$wf/skills" ]]; then
+    rm -rf "$out/skills"/*
+    cp -R "$wf/skills/." "$out/skills/"
+  fi
+  ok "gemini → .gemini/commands (toml) + .gemini/skills"
+}
+
+# Remove o primeiro bloco de frontmatter YAML (--- ... ---) do arquivo.
+strip_frontmatter() {
+  awk 'BEGIN{infm=0; done=0}
+    NR==1 && $0=="---" {infm=1; next}
+    infm==1 && $0=="---" {infm=0; done=1; next}
+    infm==1 {next}
+    {print}' "$1"
+}
+
+# ===========================================================================
+# sdd spec-hash — grava/atualiza SHA do PRD/SPEC dentro do tasks.md
+# ===========================================================================
+sha_of() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}';
+  elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}';
+  else die "nem shasum nem sha256sum disponíveis"; fi
+}
+
+cmd_spec_hash() {
+  local tasks="${1:-}"
+  [[ -n "$tasks" && -f "$tasks" ]] || die "uso: sdd spec-hash <caminho/para/03-PLAN-EXEC.md ou tasks.md>"
+  local dir prd spec h_prd h_spec
+  dir="$(dirname "$tasks")"
+  prd="$(ls "$dir"/01-PRD.md "$dir"/prd.md 2>/dev/null | head -1 || true)"
+  spec="$(ls "$dir"/02-SPEC.md "$dir"/techspec.md 2>/dev/null | head -1 || true)"
+  [[ -n "$prd" ]]  && h_prd="$(sha_of "$prd")"   || h_prd="(sem-prd)"
+  [[ -n "$spec" ]] && h_spec="$(sha_of "$spec")" || h_spec="(sem-spec)"
+
+  local tmp; tmp="$(mktemp)"
+  grep -v -E '^<!-- spec-hash-(prd|spec):' "$tasks" > "$tmp" || true
+  {
+    printf '<!-- spec-hash-prd: %s -->\n'  "$h_prd"
+    printf '<!-- spec-hash-spec: %s -->\n' "$h_spec"
+    cat "$tmp"
+  } > "$tasks"
+  rm -f "$tmp"
+  ok "spec-hash gravado em $tasks (prd=$h_prd spec=$h_spec)"
+}
+
+cmd_check_drift() {
+  local tasks="${1:-}"
+  [[ -n "$tasks" && -f "$tasks" ]] || die "uso: sdd check-drift <tasks.md>"
+  local dir prd spec want_prd want_spec cur_prd cur_spec rc=0
+  dir="$(dirname "$tasks")"
+  prd="$(ls "$dir"/01-PRD.md "$dir"/prd.md 2>/dev/null | head -1 || true)"
+  spec="$(ls "$dir"/02-SPEC.md "$dir"/techspec.md 2>/dev/null | head -1 || true)"
+  want_prd="$(sed -n 's/^<!-- spec-hash-prd:[[:space:]]*\(.*\)[[:space:]]*-->$/\1/p' "$tasks" | tr -d ' ' | head -1)"
+  want_spec="$(sed -n 's/^<!-- spec-hash-spec:[[:space:]]*\(.*\)[[:space:]]*-->$/\1/p' "$tasks" | tr -d ' ' | head -1)"
+  [[ -z "$want_prd" && -z "$want_spec" ]] && die "tasks.md não tem spec-hash. Rode: sdd spec-hash $tasks"
+  if [[ -n "$prd" ]]; then
+    cur_prd="$(sha_of "$prd")"
+    if [[ "$cur_prd" != "$want_prd" ]]; then err "PRD mudou desde o tasks.md (drift). Revise as tasks."; rc=1; else ok "PRD em dia"; fi
+  fi
+  if [[ -n "$spec" ]]; then
+    cur_spec="$(sha_of "$spec")"
+    if [[ "$cur_spec" != "$want_spec" ]]; then err "SPEC mudou desde o tasks.md (drift). Revise as tasks."; rc=1; else ok "SPEC em dia"; fi
+  fi
+  [[ $rc -eq 0 ]] && ok "Sem drift." || warn "Drift detectado — re-rode sdd spec-hash após reconciliar."
+  return $rc
+}
+
+# ===========================================================================
+# sdd lint — valida SKILL.md e estrutura das skills
+# ===========================================================================
+cmd_lint() {
+  local wf rc=0
+  wf="$(resolve_workflow_dir)"
+  [[ -n "$wf" ]] || die "fonte-única não encontrada."
+  info "Lint das skills em $wf/skills"
+  while IFS= read -r skill; do
+    local f="$skill/SKILL.md"
+    if [[ ! -f "$f" ]]; then err "skill sem SKILL.md: $skill"; rc=1; continue; fi
+    head -1 "$f" | grep -q '^---$' || { err "frontmatter ausente: $f"; rc=1; }
+    grep -q '^name:' "$f"        || { err "campo 'name' ausente: $f"; rc=1; }
+    grep -q '^description:' "$f" || { err "campo 'description' ausente: $f"; rc=1; }
+    grep -q '^version:' "$f"     || warn "campo 'version' ausente: $f"
+  done < <(find "$wf/skills" -mindepth 1 -type d -exec test -f "{}/SKILL.md" \; -print 2>/dev/null)
+  [[ $rc -eq 0 ]] && ok "Lint OK" || err "Lint encontrou problemas"
+  return $rc
+}
+
+# ===========================================================================
+# sdd doctor — checagem de saúde da instalação
+# ===========================================================================
+cmd_doctor() {
+  local rc=0
+  info "Diagnóstico do projeto: $PROJECT_ROOT"
+  if git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    ok "repositório git detectado"
+  else
+    warn "não é um repositório git — recomendado: git init"
+  fi
+  if [[ -d "$PROJECT_ROOT/.sdd/workflow" ]]; then ok ".sdd/workflow presente (fonte-única)"; else warn ".sdd/workflow ausente — rode o install"; fi
+  if [[ -f "$PROJECT_ROOT/docs/explanation/constitution.md" ]]; then ok "constitution.md presente"; else warn "constitution.md ausente — rode 'sdd analyze' ou /analyze"; fi
+  for tool in claude codex gemini; do
+    [[ -d "$PROJECT_ROOT/.$tool" ]] && ok "adaptador .$tool presente"
+  done
+  if [[ -d "$PROJECT_ROOT/docs/changes" ]]; then ok "docs/changes presente"; else warn "docs/changes ausente"; fi
+  # spec-hash em todas as changes com tasks
+  while IFS= read -r t; do
+    if ! grep -q '^<!-- spec-hash-' "$t" 2>/dev/null; then warn "sem spec-hash: $t (rode: sdd spec-hash \"$t\")"; fi
+  done < <(find "$PROJECT_ROOT/docs/changes" -name '03-PLAN-EXEC.md' 2>/dev/null)
+  [[ $rc -eq 0 ]] && ok "Doctor concluído"
+  return $rc
+}
+
+cmd_version() { echo "sdd $SDD_VERSION"; }
+
+usage() {
+  cat <<EOF
+${c_bold}sdd${c_reset} — Spec-Driven Development workflow CLI v$SDD_VERSION
+
+Uso:
+  sdd <comando> [opções]
+
+Comandos:
+  ${c_bold}sync${c_reset} --tools claude,codex,gemini   Gera adaptadores a partir da fonte-única (.sdd/workflow)
+  ${c_bold}analyze${c_reset}                            Detecta stacks do projeto e ativa skills (veja /analyze no agente)
+  ${c_bold}spec-hash${c_reset} <tasks.md>               Grava SHA do PRD/SPEC no tasks.md (detecção de drift)
+  ${c_bold}check-drift${c_reset} <tasks.md>             Falha se PRD/SPEC mudaram desde o tasks.md
+  ${c_bold}lint${c_reset}                               Valida SKILL.md e estrutura das skills
+  ${c_bold}doctor${c_reset}                             Checagem de saúde da instalação
+  ${c_bold}version${c_reset}                            Mostra a versão
+
+Fonte-única: você edita SOMENTE em .sdd/workflow/ e roda 'sdd sync'.
+EOF
+}
+
+main() {
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    sync)        cmd_sync "$@" ;;
+    spec-hash)   cmd_spec_hash "$@" ;;
+    check-drift) cmd_check_drift "$@" ;;
+    lint)        cmd_lint "$@" ;;
+    doctor)      cmd_doctor "$@" ;;
+    analyze)     warn "use o comando /analyze dentro do agente de IA (Claude/Codex/Gemini)"; exit 0 ;;
+    version|--version|-v) cmd_version ;;
+    ""|help|-h|--help) usage ;;
+    *) err "comando desconhecido: $cmd"; usage; exit 1 ;;
+  esac
+}
+main "$@"

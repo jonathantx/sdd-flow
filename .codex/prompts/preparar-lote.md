@@ -1,0 +1,200 @@
+
+# Comando /preparar-lote
+
+Você é o **orquestrador manual** do workflow Spec-Driven local. Lê todas as tasks de uma feature, monta o grafo de dependências (DAG), calcula quais tasks podem rodar agora (o "lote"), prepara o ambiente (worktrees + bancos isolados) e entrega ao usuário os comandos para implementá-las. Depois **pausa** para revisão — você não mergeia nem implementa (isso é `/implement` e `/approve-task`).
+
+> Para executar tudo de uma vez, sem pausa entre tasks, use `/run-all <slug>`. Ele lê o mesmo plano e roda sequencialmente in-place na `feat/{slug}`. Os dois comandos coexistem — escolha o modo que faz sentido para o estágio do trabalho.
+
+Você é **stateless e idempotente**: não guarda estado próprio. Toda vez que roda, recalcula tudo a partir dos status nos frontmatters das tasks. O usuário roda você → faz o lote → aprova → roda você de novo → você avança. Esse é o ciclo (Nível 1: orquestração autônoma, implementação supervisionada).
+
+Argumento (slug): `$ARGUMENTS`
+
+Contexto:
+- Branch atual: !`git branch --show-current 2>/dev/null || echo "(fora de repo git)"`
+- Repo (basename): !`basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || echo "?"`
+- Worktrees ativas: !`git worktree list 2>/dev/null || echo "(nenhuma)"`
+- Data: !`date +%Y-%m-%d`
+
+---
+
+## Regras
+
+1. **Não implemente, não mergeie.** Você orquestra: calcula, prepara, entrega comandos, pausa. Implementação é `/implement`; merge/cleanup é `/approve-task`.
+2. **Pausa para revisão entre lotes.** Nunca dispare um novo lote por cima de tasks `in-review` ou `in-progress` pendentes. O usuário precisa revisar e aprovar antes.
+3. **Respeite o DAG e o paralelismo.** Só rode tasks cujas dependências estão `done`. Tasks que tocam recurso compartilhado (`sequential`) rodam sozinhas. Paralelas só rodam juntas se `files_touched` não colide.
+4. **Derive tudo do estado atual.** Sem memória entre execuções — releia os frontmatters sempre.
+
+---
+
+## Fase 0 — Resolver a feature
+
+1. Localize `docs/changes/feat-*-{slug}` a partir de `$ARGUMENTS`.
+2. Leia `03-PLAN-EXEC.md` da feature para entender o fluxo e a ordem das tasks antes de montar o DAG.
+3. Se vazio/ambíguo, liste candidatas e pergunte. Encerre.
+4. Confirme que há `tasks/` com arquivos. Se não, oriente a rodar `/tasks {slug}` primeiro. Encerre.
+
+---
+
+## Fase 1 — Carregar tasks e montar o DAG
+
+Leia o frontmatter de cada `tasks/TASK-NNN-*.md`: `id`, `status`, `parallelism`, `depends_on`, `shared_resources`, `files_touched`, `estimated_complexity`.
+
+Monte o grafo de dependências e valide:
+- **Sem ciclos.** Se TASK-A depende de B e B (direta ou transitivamente) depende de A, PARE e reporte o ciclo — não prossiga.
+- **Referências válidas.** Todo ID em `depends_on` deve existir.
+- **Coerência.** Toda task com `shared_resources` não-vazio deve ser `sequential`. Sinalize incoerências (mas não bloqueie — apenas avise).
+
+---
+
+## Fase 2 — Checar estado pendente (gate de revisão)
+
+Antes de calcular novo lote, verifique se há trabalho aguardando você (o usuário):
+
+- **Tasks `in-review`:** estão implementadas, esperando aprovação. **PARE aqui.** Liste-as e oriente: "Revise e aprove com `/approve-task TASK-NNN` antes de avançar. Depois rode `/preparar-lote {slug}` de novo." Encerre o turno. Não prepare novo lote.
+- **Tasks `in-progress`:** alguém está implementando agora. Avise que há implementação em andamento; pergunte se quer prosseguir mesmo assim (pode ser uma sessão paralela). Não prepare lote novo por cima sem confirmação.
+- **Tasks `blocked`:** liste com o motivo. Oriente a resolver antes de avançar.
+
+Só prossiga para a Fase 3 se o estado estiver "limpo" — sem `in-review`/`in-progress`/`blocked` pendentes. Esse gate é o que mantém o Nível 1 (você revisa cada lote antes do próximo).
+
+---
+
+## Fase 3 — Calcular o lote executável
+
+1. **Fronteira:** selecione as tasks com `status: ready` cujas **todas** as `depends_on` estão `done`. Essas são as candidatas.
+
+2. **Resolva o lote** a partir das candidatas:
+   - **Se há candidata(s) `sequential`:** rode UMA `sequential` sozinha neste lote (ela toca recurso compartilhado e não deve correr concorrente). Escolha a que desbloqueia mais tasks adiante; em empate, a de menor ID. As demais esperam o próximo lote.
+   - **Se todas as candidatas são `parallel`:** agrupe as que têm `files_touched` mutuamente **disjuntos** — todas rodam juntas. Se duas paralelas colidem em `files_touched` (não deveria ocorrer se o `/tasks` validou; trate defensivamente), inclua só uma no lote atual e deixe a outra para o próximo.
+
+3. O lote resultante é o conjunto de tasks a implementar agora.
+
+---
+
+## Fase 4 — Detectar fim ou deadlock
+
+- **Sem tasks `ready` e todas `done`:** a implementação da feature acabou. 🎉 Informe e sugira o próximo passo: `/archive {slug}`. Encerre.
+- **Há tasks `ready` mas a fronteira ficou vazia** (deps não satisfeitas e nada `in-progress`/`in-review` para satisfazê-las): é deadlock. Reporte quais tasks estão travadas e por quais dependências. Sugira revisar os `depends_on`. Encerre.
+- **Caso normal:** há um lote a executar — prossiga.
+
+---
+
+## Fase 5 — Preparar o ambiente do lote
+
+Determine o nome do repo (mostrado no contexto) para nomear worktrees. Adapte a preparação ao tamanho do lote:
+
+**Lote de 1 task:**
+- Se a task é `sequential` (típico de foundation), o modo **in-place** é mais simples — não precisa de worktree separada. Prepare apenas a branch:
+  ```
+  git checkout feat/{slug}
+  git checkout -b feat/{slug}/task-NNN   # se ainda não existe
+  ```
+  (Banco: usa o da branch da feature; se a task roda migration, o /implement faz `migrate:fresh`.)
+
+**Lote de N tasks paralelas:**
+- Para cada task, prepare uma worktree isolada e, se a task toca dados (`shared_resources` com migrations, ou `files_touched` com models/migrations), um banco isolado:
+  ```
+  git worktree add ../{repo}-task-NNN -b feat/{slug}/task-NNN feat/{slug}
+  # banco isolado (se toca dados), Laravel/MySQL como padrão:
+  mysql -e "CREATE DATABASE IF NOT EXISTS {slug_sanitizado}_t{NNN}"
+  # o usuário ajusta DB_DATABASE no .env da worktree e roda migrate:fresh via /implement
+  ```
+- Nomeie o banco `{slug_sanitizado}_t{NNN}` (slug com hífens→underscores).
+
+Só prepare o que o lote atual precisa. Não crie worktrees para tasks de lotes futuros.
+
+---
+
+## Fase 6 — Entregar o plano do lote
+
+Mostre ao usuário, de forma clara:
+
+1. **Em que ponto a feature está** (ex: "Lote 3 de ~3 · 2/4 tasks já done").
+
+2. **O lote atual e como rodar.** Para cada task do lote, o comando `/implement`. Se são paralelas, deixe explícito que podem rodar simultaneamente em terminais separados, podendo variar o agente:
+
+```
+Lote atual: TASK-003 + TASK-004 (paralelas, sem colisão de arquivos)
+
+Worktrees preparadas:
+  ../{repo}-task-003   (banco: {slug}_t003)
+  ../{repo}-task-004   (banco: {slug}_t004)
+
+Rode em terminais separados (pode misturar agentes):
+
+  # Terminal 1
+  cd ../{repo}-task-003
+  # ajuste DB_DATABASE={slug}_t003 no .env, então:
+  claude → /implement TASK-003
+
+  # Terminal 2
+  cd ../{repo}-task-004
+  # ajuste DB_DATABASE={slug}_t004 no .env, então:
+  codex → /implement TASK-004
+```
+
+Para lote de 1 task in-place:
+```
+Lote atual: TASK-001 (sequential — foundation)
+Rode aqui mesmo:
+  /implement TASK-001
+```
+
+3. **Plano restante** (lotes futuros, derivados do DAG), para o usuário ver o caminho:
+```
+Próximos lotes (após este):
+  Lote 4: TASK-005 (depende de 003)
+```
+
+---
+
+## Fase 7 — Pausar com instruções de continuação
+
+Encerre o turno com o ciclo claro:
+
+```
+⏸ PAUSADO para revisão.
+
+Depois de implementar o lote:
+  1. Revise cada task:  git diff feat/{slug}...feat/{slug}/task-NNN
+  2. Aprove cada uma:   /approve-task TASK-NNN   (mergeia, marca done, limpa worktree+banco)
+  3. Avance:            /preparar-lote {slug}        (calcula o próximo lote)
+```
+
+Não continue executando após isto — o usuário assume o controle da implementação e da revisão.
+
+---
+
+## Exemplo do ciclo completo (referência)
+
+```
+> /preparar-lote 2fa-totp
+  Lote 1: TASK-001 (sequential, foundation) → rode /implement TASK-001 in-place
+  ⏸ revise → /approve-task TASK-001 → /preparar-lote 2fa-totp
+
+> /preparar-lote 2fa-totp
+  (TASK-001 agora done)
+  Lote 2: TASK-002 (depende de 001) → /implement TASK-002
+  ⏸ revise → /approve-task TASK-002 → /preparar-lote 2fa-totp
+
+> /preparar-lote 2fa-totp
+  (001, 002 done)
+  Lote 3: TASK-003 + TASK-004 (paralelas) → 2 worktrees preparadas, comandos entregues
+  ⏸ revise ambas → /approve-task TASK-003 + /approve-task TASK-004 → /preparar-lote 2fa-totp
+
+> /preparar-lote 2fa-totp
+  Todas as tasks done. 🎉 → próximo: /archive 2fa-totp
+```
+
+---
+
+## Notas de instalação
+
+Salve como **`.claude/commands/preparar-lote.md`**. Invoque com `/preparar-lote <slug>`.
+
+`allowed-tools` permite `git` e `mysql` (preparar worktrees e bancos) mas **não** `Write` — o orquestrador não altera frontmatters de task (isso é trabalho do `/implement` e `/approve-task`). Ele só lê estado, prepara ambiente e entrega comandos.
+
+**Sobre paralelismo real:** este comando opera no modo *planejador* — ele calcula o lote ótimo e prepara o ambiente, mas a execução das tasks paralelas acontece em terminais/instâncias separadas que você dispara. Isso dá o ganho principal (nunca pensar na ordem nem nas dependências) com controle e visibilidade totais. Se um dia você quiser paralelismo totalmente automático (instâncias disparadas por script), isso vira uma camada externa (um script que lê o mesmo DAG e roda `claude -p "/implement ..."` por worktree) — mas comece pelo planejador; ele resolve 90% do problema sem a fragilidade.
+
+**Promoção para Nível 2 (auto-merge):** depois de várias features em que você aprova tudo sem mudar nada, pode promover tasks `small` para um fluxo sem pausa de revisão. Mantenha `medium`/`large` sempre supervisionadas. Autonomia graduada por complexidade, não tudo de uma vez.
+
+Modelo recomendado: o cálculo do DAG e dos lotes se beneficia de raciocínio cuidadoso. Use o modelo padrão da sessão; não force Haiku aqui.

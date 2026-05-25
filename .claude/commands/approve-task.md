@@ -1,0 +1,158 @@
+---
+description: Aprova uma task implementada — mergeia a branch da task em feat/{slug} (se worktree), marca status como done e limpa worktree+banco isolado. Comando complementar ao /implement no fluxo manual com /preparar-lote.
+argument-hint: <TASK-NNN> [slug]
+allowed-tools: Bash(git:*), Bash(mysql:*), Bash(find:*), Bash(grep:*), Bash(ls:*), Bash(basename:*), Bash(test:*), Bash(date:*), Read, Edit, Grep, Glob
+---
+
+# Comando /approve-task
+
+Você fecha a aprovação de uma **task implementada** no workflow Spec-Driven local. O usuário rodou `/implement TASK-NNN`, revisou o diff, está satisfeito — agora você consolida: mergeia a branch da task em `feat/{slug}` (se houve worktree), marca a task como `done` no frontmatter, e limpa o que precisar (worktree, banco isolado).
+
+> ⚠️ Não confundir com `/approve`. Aquele é para mudar frontmatter de PRD/SPEC de `draft` para `approved`. Este (`/approve-task`) é para finalizar uma TASK específica.
+
+Argumento: `$ARGUMENTS` (ex: `TASK-002` ou `TASK-002 export-inquerito-pdf`)
+
+Contexto carregado automaticamente:
+- Branch atual: !`git branch --show-current 2>/dev/null || echo "(fora de repo git)"`
+- Working tree: !`git status --short 2>/dev/null || echo "(fora de repo git)"`
+- Repo (basename): !`basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || echo "?"`
+- Worktrees ativas: !`git worktree list 2>/dev/null || echo "(nenhuma)"`
+- Data: !`date +%Y-%m-%d`
+
+---
+
+## Regras
+
+1. **Só aprova tasks em status `in-review`.** Outros estados precisam ser corrigidos antes (não dá para aprovar `ready`, e `done` já é o que queremos).
+2. **Detecte o modo de implementação automaticamente.** Worktree (branch separada `feat/{slug}/task-NNN`) → precisa de merge. In-place (commit já está em `feat/{slug}`) → só precisa marcar done.
+3. **Limpe o que foi criado.** Worktree → remover. Banco isolado → drop. Branch da task → deletar local (sem `-D`; força bruta só com pedido explícito).
+4. **Working tree limpo.** Se há mudanças não commitadas que impeçam operações de git, PARE e avise. Não force.
+
+---
+
+## Fase 0 — Resolver a task
+
+1. Extraia o ID (`TASK-NNN`) de `$ARGUMENTS`. Se houver slug junto, use-o; senão, procure em `docs/changes/feat-*/tasks/` pelo arquivo `TASK-NNN-*.md`.
+2. Se ambíguo (várias features com mesmo ID) ou não encontrado, liste opções e pergunte. Encerre o turno.
+3. Leia o frontmatter: `id`, `slug`, `status`, `files_touched`, `shared_resources`.
+
+---
+
+## Fase 1 — Validar pré-condições
+
+1. **Status da task:**
+   - `in-review`: prossiga.
+   - `ready`: avise — "A task ainda não foi implementada. Rode `/implement TASK-NNN` antes." Encerre.
+   - `in-progress`: avise — "A task ainda está em implementação. Conclua antes de aprovar." Encerre.
+   - `done`: avise — "Já está aprovada." Encerre.
+   - `blocked`: avise — "Está bloqueada. Resolva o bloqueio antes de aprovar." Encerre.
+
+2. **Working tree limpo (mais ou menos):** `git status --short`. Se há mudanças não-relacionadas pendentes, PARE e avise. Mudanças no próprio `TASK-NNN.md` que você vai editar agora são OK.
+
+---
+
+## Fase 2 — Detectar modo de implementação
+
+Determine se a task foi feita em worktree ou in-place:
+
+1. **Existe branch `feat/{slug}/task-NNN` localmente?** (`git branch --list feat/{slug}/task-NNN`)
+   - **Sim** → modo **worktree**. Provavelmente há também uma worktree em `../{repo}-task-NNN`. Confirme com `git worktree list`.
+   - **Não** → modo **in-place**. O commit da task já está em `feat/{slug}`. (Caso típico do `/run-all`, mas também é possível com `/implement` rodado direto na branch da feature.)
+
+2. **Confirme com o usuário** se ambíguo (ex: worktree existe mas está em outro estado). Encerre o turno se precisar de input.
+
+---
+
+## Fase 3a — Aprovação em modo worktree
+
+Se modo worktree foi detectado:
+
+1. **Garanta que a branch da task tem o commit da implementação.** `git log feat/{slug}/task-NNN --oneline -5` — deve mostrar o commit `feat({slug}): TASK-NNN — …`.
+
+2. **Volte para `feat/{slug}`:**
+   ```
+   git checkout feat/{slug}
+   ```
+
+3. **Faça o merge** (preserve o histórico da task com merge commit explícito):
+   ```
+   git merge --no-ff feat/{slug}/task-NNN -m "merge({slug}): TASK-NNN"
+   ```
+   Se houver conflito, PARE — não resolva sozinho. Avise: "Conflito ao mergear TASK-NNN. Resolva manualmente e rode `/approve-task TASK-NNN` de novo." Encerre o turno.
+
+4. **Limpe a worktree:**
+   ```
+   git worktree remove ../{repo}-task-NNN
+   ```
+   (Se a worktree tem mudanças não commitadas, `git worktree remove` falha — avise o usuário em vez de forçar.)
+
+5. **Delete a branch local da task:**
+   ```
+   git branch -d feat/{slug}/task-NNN
+   ```
+   Use `-d` (não `-D`): só deleta se já foi mergeada. Como acabamos de mergear, vai funcionar.
+
+6. **Limpe o banco isolado (se aplicável).** Se a task tinha `shared_resources` com migrations ou tocava dados, provavelmente foi criado um banco `{slug_sanitizado}_t{NNN}` (stack do projeto):
+   ```
+   mysql -e "DROP DATABASE IF EXISTS {slug_sanitizado}_t{NNN}"
+   ```
+   Pergunte antes se não tiver certeza que o banco existe e foi criado pelo fluxo.
+
+---
+
+## Fase 3b — Aprovação em modo in-place
+
+Se modo in-place:
+
+1. **Confirme que está em `feat/{slug}`.** Se não, faça checkout (avisando).
+2. **Não há merge nem cleanup de worktree** — o commit já está na branch da feature.
+
+---
+
+## Fase 4 — Marcar a task como done
+
+1. Edite o `TASK-NNN.md`: frontmatter `status: in-review` → `status: done`.
+2. Não mexa em mais nada do arquivo.
+
+---
+
+## Fase 5 — Commit de bookkeeping
+
+Faça o commit que registra a aprovação:
+
+```
+git add docs/changes/{pasta}/tasks/TASK-NNN-*.md
+git commit -m "chore({slug}): mark TASK-NNN as done"
+```
+
+(Esse padrão de commit `chore: mark TASK-NNN as done` é o que o `/archive` reconhece ao montar o resumo.)
+
+---
+
+## Fase 6 — Confirmação e próximo passo
+
+Mostre ao usuário, conciso:
+
+1. Task aprovada: `TASK-NNN` está agora `done`.
+2. Modo (worktree mergeada ou in-place direto).
+3. Worktree e banco limpos (se aplicável).
+4. Branch atual: `feat/{slug}`.
+5. **Próximo passo:**
+   - Se ainda há tasks pendentes: `/preparar-lote {slug}` (próximo lote) ou `/run-all {slug}` (autônomo, do ponto onde parou).
+   - Se todas as tasks estão `done`: `/archive {slug}` para fechar a change.
+
+Para descobrir o estado geral: `/status {slug}`.
+
+---
+
+## Notas de instalação
+
+Salve como **`.claude/commands/approve-task.md`**. Invoque com `/approve-task <TASK-NNN> [slug]`.
+
+**Por que separado de `/approve`:** o `/approve` original mexe em frontmatter de documentos (`status: draft` → `approved` em PRD/SPEC) e é simples. Aprovação de task é diferente: envolve git (merge), limpeza (worktree, banco) e bookkeeping (status `done`, commit). Misturar os dois num só comando deixava ambíguo o `$ARGUMENTS` (slug de feature vs. ID de task) e a lógica condicional crescia demais.
+
+**Relação com `/run-all`:** o modo autônomo (`/run-all`) embute a lógica deste comando na Fase 4h (`auto-aprovar`). Você só precisa do `/approve-task` no fluxo manual com `/preparar-lote` + `/implement` + revisão por task.
+
+`allowed-tools` é restrito a operações de leitura, edição do `TASK-NNN.md`, e comandos git/mysql necessários para merge/cleanup. Sem `Bash` amplo — este comando é fechamento, não execução livre.
+
+Modelo recomendado: pode rodar no modelo padrão da sessão; lógica simples e auditável. Não precisa do mais forte.
