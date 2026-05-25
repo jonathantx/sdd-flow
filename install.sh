@@ -121,6 +121,41 @@ if [[ $INSTALL_SCALAR -eq 1 ]]; then
   ok "scalar/ (porta 8802 via docker)"
 fi
 
+# --- docker-compose.sdd.yml (gerado conforme as flags de docs) --------------
+# Arquivo SEPARADO do docker-compose.yml do projeto, para nunca conflitar.
+# Use:  docker compose -f docker-compose.sdd.yml up
+if [[ $INSTALL_FUMADOCS -eq 1 || $INSTALL_SCALAR -eq 1 ]]; then
+  say "Gerando docker-compose.sdd.yml"
+  {
+    echo "# Serviços de documentação do SDD Workflow (separado do seu docker-compose.yml)."
+    echo "# Subir:  docker compose -f docker-compose.sdd.yml up --build"
+    echo "services:"
+    if [[ $INSTALL_FUMADOCS -eq 1 ]]; then
+      cat <<'YML'
+  docs-fumadocs:
+    build: ./docs-fumadocs
+    ports:
+      - "8801:3000"
+    volumes:
+      - ./docs:/app/content/docs:ro      # sua documentação, montada (sem rebuild ao editar)
+    restart: unless-stopped
+YML
+    fi
+    if [[ $INSTALL_SCALAR -eq 1 ]]; then
+      cat <<'YML'
+  scalar:
+    build: ./scalar
+    ports:
+      - "8802:80"
+    volumes:
+      - ./scalar/openapi.yaml:/usr/share/nginx/html/openapi.yaml:ro
+    restart: unless-stopped
+YML
+    fi
+  } > "$ROOT_DIR/docker-compose.sdd.yml"
+  ok "docker-compose.sdd.yml gerado (fumadocs:8801, scalar:8802 conforme escolhido)"
+fi
+
 cat <<EOF
 
 ✓ Instalação concluída.
@@ -132,3 +167,13 @@ Próximos passos:
 
 Edite o workflow SOMENTE em .sdd/workflow/ e rode  .sdd/bin/sdd sync  para propagar.
 EOF
+
+if [[ $INSTALL_FUMADOCS -eq 1 || $INSTALL_SCALAR -eq 1 ]]; then
+  cat <<EOF
+
+📚 Documentação via Docker:
+  docker compose -f docker-compose.sdd.yml up --build
+EOF
+  [[ $INSTALL_FUMADOCS -eq 1 ]] && echo "  → Fumadocs:  http://localhost:8801"
+  [[ $INSTALL_SCALAR   -eq 1 ]] && echo "  → Scalar:    http://localhost:8802"
+fi
