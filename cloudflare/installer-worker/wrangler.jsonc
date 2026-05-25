@@ -1,0 +1,12 @@
+{
+  "name": "sdd-install",
+  "main": "src/index.js",
+  "compatibility_date": "2026-05-25",
+  "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "install.jonathanteixeira.com.br",
+      "custom_domain": true
+    }
+  ]
+}
