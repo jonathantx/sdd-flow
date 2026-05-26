@@ -96,18 +96,37 @@ if [[ "${SDD_NONINTERACTIVE:-0}" != "1" && -z "${CI:-}" && $NONINTERACTIVE -eq 0
   if { exec 3</dev/tty; } 2>/dev/null; then TTY_OK=1; fi
 fi
 
-# Prompts SEM subshell: escrevem direto na variável global $REPLY_VAL.
-# (usar $(...) quebra porque o fd 3 não é herdado pelo subshell + set -e mata)
-ask_csv() { # $1 pergunta  $2 default → resultado em REPLY_VAL
-  local q="$1" def="$2" ans=""
-  printf '%s? %s%s %s[%s]%s: ' "$cy" "$c0" "$q" "$cd" "${def:-vazio}" "$c0" >/dev/tty
-  IFS= read -r ans <&3 || ans=""
-  REPLY_VAL="${ans:-$def}"
+# Prompts por NÚMERO (à prova de erro de digitação) — sem subshell.
+# ask_choice: menu de múltipla escolha. Resultado (csv de valores) em REPLY_VAL.
+#   $1 = título   $2 = linha de ajuda   $3 = csv de pré-selecionados (defaults)
+#   $4.. = itens no formato "valor:rótulo"
+ask_choice() {
+  local title="$1" help="$2" preset="$3"; shift 3
+  local items=("$@") i val label
+  printf '\n%s? %s%s%s\n' "$cy" "$cb" "$title" "$c0" >/dev/tty
+  [[ -n "$help" ]] && printf '   %s%s%s\n' "$cd" "$help" "$c0" >/dev/tty
+  for i in "${!items[@]}"; do
+    val="${items[$i]%%:*}"; label="${items[$i]#*:}"
+    local mark=' '; [[ ",$preset," == *",$val,"* ]] && mark='x'
+    printf '   %s[%s]%s %s) %s\n' "$cg" "$mark" "$c0" "$((i+1))" "$label" >/dev/tty
+  done
+  printf '   %s→ números separados por espaço (ex: 1 3) · Enter aceita o padrão:%s ' "$cd" "$c0" >/dev/tty
+  local ans=""; IFS= read -r ans <&3 || ans=""
+  if [[ -z "$ans" ]]; then REPLY_VAL="$preset"; return 0; fi
+  # converter números escolhidos em csv de valores
+  local out="" n
+  for n in $ans; do
+    if [[ "$n" =~ ^[0-9]+$ ]] && (( n>=1 && n<=${#items[@]} )); then
+      val="${items[$((n-1))]%%:*}"; out="${out:+$out,}$val"
+    fi
+  done
+  REPLY_VAL="$out"   # vazio = nenhum (ex.: 0 ou inválido → instala sem aquilo)
 }
-ask_yn() { # $1 pergunta  $2 default(Y/N) → 0 se sim
-  local q="$1" def="${2:-N}" ans=""
-  if [[ "$def" == "Y" ]]; then q="$q [Y/n] "; else q="$q [y/N] "; fi
-  printf '%s? %s%s' "$cy" "$c0" "$q" >/dev/tty
+ask_yn() { # $1 pergunta  $2 ajuda  $3 default(Y/N) → 0 se sim
+  local q="$1" help="$2" def="${3:-N}" ans=""
+  printf '\n%s? %s%s%s' "$cy" "$cb" "$q" "$c0" >/dev/tty
+  [[ "$def" == "Y" ]] && printf ' [Y/n] ' >/dev/tty || printf ' [y/N] ' >/dev/tty
+  printf '\n   %s%s%s\n   → ' "$cd" "$help" "$c0" >/dev/tty
   IFS= read -r ans <&3 || ans=""
   ans="${ans:-$def}"
   [[ "$ans" =~ ^[YySs] ]]
@@ -120,13 +139,27 @@ if [[ $FORCE_ALL -eq 1 ]]; then
 elif [[ -n "$ARG_TOOLS$ARG_STACKS" || $NONINTERACTIVE -eq 1 ]]; then
   TOOLS="${ARG_TOOLS:-claude}"; STACKS="$ARG_STACKS"
 elif [[ $TTY_OK -eq 1 ]]; then
-  say "Responda para personalizar (Enter aceita o padrão):"
-  ask_csv 'Ferramentas de IA (claude,codex,gemini)' 'claude';                         TOOLS="$REPLY_VAL"
-  ask_csv 'Stacks (node-typescript,php-laravel,react,svelte)' "${DETECTED:-}";        STACKS="$REPLY_VAL"
-  ask_yn 'Instalar documentação Fumadocs?' 'N' && WANT_FUMADOCS=1 || true
-  ask_yn 'Instalar referência de API Scalar?' 'N' && WANT_SCALAR=1 || true
-  ask_yn 'Instalar gate de CI (GitHub Action)?' 'N' && WANT_CI=1 || true
-  ask_yn 'Instalar git hook de pre-commit?' 'N' && WANT_HOOK=1 || true
+  say "Vamos personalizar a instalação. Escolha pelos números (Enter = padrão)."
+
+  ask_choice 'Ferramentas de IA' \
+    'Onde os comandos /ideia, /spec etc. vão funcionar. Pode marcar mais de uma.' \
+    'claude' \
+    'claude:Claude Code' 'codex:Codex CLI' 'gemini:Gemini CLI'
+  TOOLS="${REPLY_VAL:-claude}"
+
+  ask_choice 'Stacks do projeto' \
+    "Bases de conhecimento que evitam alucinação. Detectadas: ${DETECTED:-nenhuma} (já pré-marcadas)." \
+    "${DETECTED:-}" \
+    'node-typescript:Node.js + TypeScript (backend)' \
+    'php-laravel:PHP + Laravel (backend)' \
+    'react:React (frontend)' \
+    'svelte:Svelte / SvelteKit (frontend)'
+  STACKS="$REPLY_VAL"
+
+  ask_yn 'Instalar Fumadocs?' 'Site de documentação navegável (roda via Docker, porta 8801).' 'N' && WANT_FUMADOCS=1 || true
+  ask_yn 'Instalar Scalar?' 'Visualizador de API a partir de OpenAPI (porta 8802). Só útil se você tem API REST.' 'N' && WANT_SCALAR=1 || true
+  ask_yn 'Instalar gate de CI?' 'GitHub Action que valida o workflow em cada Pull Request.' 'N' && WANT_CI=1 || true
+  ask_yn 'Instalar git hook?' 'Checagem automática antes de cada commit (avisa problemas cedo).' 'N' && WANT_HOOK=1 || true
 else
   # pipe sem terminal e sem flags → instalação mínima sensata
   TOOLS="claude"; STACKS="$DETECTED"
