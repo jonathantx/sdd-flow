@@ -77,35 +77,40 @@ ok "kit pronto (versão $(cat "$KIT_HOME/VERSION" 2>/dev/null || echo '?'))"
 DETECT="$KIT_HOME/assets/workflow/skills/analyze-project/scripts/detect-stack.sh"
 DETECTED=""
 if [[ -x "$DETECT" ]]; then
-  DETECTED="$(bash "$DETECT" "$PROJECT" 2>/dev/null | sed -n 's/.*skill=\([a-z0-9-]*\).*/\1/p' | grep -v '^none$' | sort -u | paste -sd, -)"
+  # '|| true' em cada elo: quando não há stack, grep -v filtra tudo e retorna 1,
+  # o que com 'set -e' mataria o script. Blindamos a pipeline inteira.
+  DETECTED="$( { bash "$DETECT" "$PROJECT" 2>/dev/null \
+    | sed -n 's/.*skill=\([a-z0-9-]*\).*/\1/p' \
+    | grep -v '^none$' \
+    | sort -u \
+    | paste -sd, - ; } || true )"
 fi
 [[ -n "$DETECTED" ]] && note "Stacks detectadas no projeto: $cb$DETECTED$c0"
 
 # --- helpers de prompt (leem do terminal real via /dev/tty) -----------------
-# Interativo só quando dá para ABRIR /dev/tty para leitura. Num pipe puro de CI
-# (sem terminal) isso falha e caímos no modo não-interativo. O 'exec' abre o fd 3
-# ligado ao terminal real; se falhar, has_tty retorna falso sem abortar (set -e
-# é neutralizado pelo '|| return 1').
-has_tty() {
-  # Força não-interativo em CI ou quando SDD_NONINTERACTIVE=1.
-  [[ "${SDD_NONINTERACTIVE:-0}" == "1" || -n "${CI:-}" ]] && return 1
-  [[ $NONINTERACTIVE -eq 1 ]] && return 1
-  { exec 3</dev/tty; } 2>/dev/null || return 1
-  return 0
+# Abre o terminal real uma única vez no fd 3. Num pipe (curl | bash) o stdin é o
+# próprio script, então perguntamos pelo /dev/tty. Se não der (CI/sem terminal),
+# TTY_OK fica 0 e caímos no modo não-interativo.
+TTY_OK=0
+if [[ "${SDD_NONINTERACTIVE:-0}" != "1" && -z "${CI:-}" && $NONINTERACTIVE -eq 0 ]]; then
+  if { exec 3</dev/tty; } 2>/dev/null; then TTY_OK=1; fi
+fi
+
+# Prompts SEM subshell: escrevem direto na variável global $REPLY_VAL.
+# (usar $(...) quebra porque o fd 3 não é herdado pelo subshell + set -e mata)
+ask_csv() { # $1 pergunta  $2 default → resultado em REPLY_VAL
+  local q="$1" def="$2" ans=""
+  printf '%s? %s%s %s[%s]%s: ' "$cy" "$c0" "$q" "$cd" "${def:-vazio}" "$c0" >/dev/tty
+  IFS= read -r ans <&3 || ans=""
+  REPLY_VAL="${ans:-$def}"
 }
-ask_yn() { # $1 pergunta  $2 default(Y/N)
-  local q="$1" def="${2:-N}" ans
+ask_yn() { # $1 pergunta  $2 default(Y/N) → 0 se sim
+  local q="$1" def="${2:-N}" ans=""
   if [[ "$def" == "Y" ]]; then q="$q [Y/n] "; else q="$q [y/N] "; fi
-  printf '%s? %s%s' "$cy" "$c0" "$q" > /dev/tty
+  printf '%s? %s%s' "$cy" "$c0" "$q" >/dev/tty
   IFS= read -r ans <&3 || ans=""
   ans="${ans:-$def}"
   [[ "$ans" =~ ^[YySs] ]]
-}
-ask_csv() { # $1 pergunta  $2 default-csv  → ecoa resposta
-  local q="$1" def="$2" ans
-  printf '%s? %s%s%s[%s]%s: ' "$cy" "$c0" "$q " "$cd" "$def" "$c0" > /dev/tty
-  IFS= read -r ans <&3 || ans=""
-  echo "${ans:-$def}"
 }
 
 # --- 3. decidir opções: flags > --all > interativo > default ----------------
@@ -114,10 +119,10 @@ if [[ $FORCE_ALL -eq 1 ]]; then
   WANT_FUMADOCS=1; WANT_SCALAR=1; WANT_CI=1; WANT_HOOK=1
 elif [[ -n "$ARG_TOOLS$ARG_STACKS" || $NONINTERACTIVE -eq 1 ]]; then
   TOOLS="${ARG_TOOLS:-claude}"; STACKS="$ARG_STACKS"
-elif has_tty; then
+elif [[ $TTY_OK -eq 1 ]]; then
   say "Responda para personalizar (Enter aceita o padrão):"
-  TOOLS="$(ask_csv 'Ferramentas de IA (claude,codex,gemini)' 'claude')"
-  STACKS="$(ask_csv 'Stacks (node-typescript,php-laravel,react,svelte)' "${DETECTED:-}")"
+  ask_csv 'Ferramentas de IA (claude,codex,gemini)' 'claude';                         TOOLS="$REPLY_VAL"
+  ask_csv 'Stacks (node-typescript,php-laravel,react,svelte)' "${DETECTED:-}";        STACKS="$REPLY_VAL"
   ask_yn 'Instalar documentação Fumadocs?' 'N' && WANT_FUMADOCS=1 || true
   ask_yn 'Instalar referência de API Scalar?' 'N' && WANT_SCALAR=1 || true
   ask_yn 'Instalar gate de CI (GitHub Action)?' 'N' && WANT_CI=1 || true
